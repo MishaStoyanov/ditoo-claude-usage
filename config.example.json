@@ -1,0 +1,10 @@
+{
+  "port": "COM3",
+  "interval_seconds": 120,
+  "brightness": 100,
+  "accounts": [
+    { "name": "personal", "letter": "M", "color": "#D97757" },
+    { "name": "work",     "letter": "W", "color": "#286EFF" },
+    { "name": "side",     "letter": "S", "color": "#AA3CFF" }
+  ]
+}
