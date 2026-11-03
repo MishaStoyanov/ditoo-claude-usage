@@ -7,6 +7,7 @@ Usage: pythonw ditoo_usage.py
 import json
 import math
 import os
+import socket
 import sys
 import threading
 import time
@@ -27,10 +28,16 @@ STALE_AFTER_S = 30 * 60
 LAST_USAGE = os.path.join(auth.DIR, "last_usage.json")
 DARK_FLAG = os.path.join(auth.DIR, "dark")
 MAX_ACCOUNTS = 3
+# Claude Code sessions waiting for an answer (attention.py, run by hooks); a file older than this is
+# a session that died without saying so.
+ATTENTION_DIR = os.path.join(auth.DIR, "attention")
+ATTENTION_PORT = 47821
+ATTENTION_MAX_AGE_S = 12 * 3600
 
 BLACK = (0, 0, 0)
 TRACK = (22, 22, 22)
 ERROR = (255, 0, 0)
+ATTENTION = (255, 220, 0)
 GREEN, AMBER, RED = (0, 200, 60), (255, 180, 0), (255, 30, 0)
 WARN_AT, CRITICAL_AT = 60, 85
 BAR_X0 = LABEL_WIDTH + 1
@@ -53,6 +60,7 @@ def load_config():
         "interval": cfg.get("interval_seconds", 120),
         "brightness": cfg.get("brightness", 100),
         "accounts": accounts,
+        "attention_account": cfg.get("attention_account", cfg["accounts"][0]["name"]),
     }
 
 
@@ -112,13 +120,17 @@ def draw_bar(px, rows, pct):
             px[row * 16 + BAR_X0 + x] = color if x * len(rows) + ri < filled else TRACK
 
 
-def render(results):
-    """results: list of (letter, label_color, (five_h, week) | None), one per account."""
+def render(results, waiting_at=None):
+    """results: list of (letter, label_color, (five_h, week) | None), one per account.
+    waiting_at: index of the account to underline in yellow - a Claude Code session waits for an answer."""
     px = [BLACK] * 256
     for i, (letter, label, usage) in enumerate(results):
         top = i * 6
         for x, y in glyph_pixels(letter):
             px[(top + y) * 16 + x] = label if usage else ERROR
+        if i == waiting_at and top + 4 < 16:
+            for x in range(LABEL_WIDTH):
+                px[(top + 4) * 16 + x] = ATTENTION
         if usage:
             five, week = usage
             draw_bar(px, [top + 1, top], five)
@@ -191,6 +203,33 @@ def usage_or_last(name, last):
     return None
 
 
+# --- Waiting for an answer ---------------------------------------------------------------------
+
+def waiting():
+    """True while any Claude Code session has marked itself as waiting for the user."""
+    try:
+        names = os.listdir(ATTENTION_DIR)
+    except OSError:
+        return False
+    now = time.time()
+    for name in names:
+        try:
+            if now - os.path.getmtime(os.path.join(ATTENTION_DIR, name)) < ATTENTION_MAX_AGE_S:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def listen_for_pokes(tick):
+    """attention.py sends a UDP datagram on every change; wake the loop to redraw at once."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", ATTENTION_PORT))
+    while True:
+        sock.recv(64)
+        tick.set()
+
+
 # --- Sleep / wake ------------------------------------------------------------------------------
 
 def is_dark():
@@ -254,17 +293,28 @@ def main():
         print(time.strftime("%H:%M:%S"), f"{reason}: dark={ok}", flush=True)
 
     def on_wake(reason):
+        nonlocal next_fetch
+        next_fetch = 0.0  # fresh usage after sleep, not the cached frame
         dev.suspended = False
         print(time.strftime("%H:%M:%S"), reason, flush=True)
         tick.set()  # the loop restores brightness once the Bluetooth link is back
 
     power.watch(on_sleep, on_wake)
+    threading.Thread(target=listen_for_pokes, args=(tick,), daemon=True).start()
+    names = [a[0] for a in accounts]
+    waiting_at = names.index(cfg["attention_account"]) if cfg["attention_account"] in names else 0
     last = load_last()
+    results = None
+    next_fetch = 0.0
     while True:
         if not dev.suspended:
-            results = [(letter, color, usage_or_last(name, last)) for name, letter, color in accounts]
-            save_last(last)
-            frame = image_packet(render(results))
+            fetched = results is None or time.time() >= next_fetch
+            if fetched:
+                results = [(letter, color, usage_or_last(name, last)) for name, letter, color in accounts]
+                save_last(last)
+                next_fetch = time.time() + cfg["interval"]
+            wait = waiting()
+            frame = image_packet(render(results, waiting_at if wait else None))
 
             def push(ser):
                 wake_up(ser, cfg["brightness"])
@@ -273,10 +323,10 @@ def main():
 
             if not dev.suspended and dev.run(push):
                 summary = " ".join(f"{a[1]}={r[2]}" for a, r in zip(accounts, results))
-                print(time.strftime("%H:%M:%S"), summary, flush=True)
-        tick.wait(cfg["interval"])
+                print(time.strftime("%H:%M:%S"), summary + (" waiting" if wait else ""), flush=True)
+        # A poke (attention.py) or a wake redraws at once; usage is fetched again only when due.
+        tick.wait(max(1.0, next_fetch - time.time()))
         tick.clear()
-
 
 if __name__ == "__main__":
     os.makedirs(auth.DIR, exist_ok=True)

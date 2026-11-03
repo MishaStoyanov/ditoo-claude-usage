@@ -21,6 +21,12 @@ M  ▓▓▓░░░░░░░   ← 5h session, 2 rows, 20 cells × 5%
 - **Bar color**: green below 60%, amber below 85%, red from 85%.
 - **Red letter, no bars**: no fresh data for 30+ minutes, usually because the account needs to log in again. Short API hiccups such as `429` keep showing the last known values.
 
+## Waiting for an answer
+
+A yellow line under the first account's letter (or `attention_account` in `config.json`) means a Claude Code session is waiting for you: a question or a permission prompt. It goes out when you answer.
+
+Claude Code hooks in `~/.claude/settings.json` run `attention.py on` on `Notification` (`permission_prompt|elicitation_dialog`) and `PreToolUse` (`AskUserQuestion`), and `attention.py off` on `PostToolUse`, `UserPromptSubmit` and `SessionEnd`. The script keeps one file per session in `~/.ditoo/attention/` and sends a UDP datagram to `127.0.0.1:47821`, so the screen is redrawn at once with no polling. Usage itself is still fetched every `interval_seconds`.
+
 ## How it works
 
 - **Usage data** comes from the same endpoint the Claude apps use to show plan limits (`/api/oauth/usage`), authenticated with an OAuth token per account.
