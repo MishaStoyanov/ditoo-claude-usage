@@ -23,7 +23,7 @@ M  ▓▓▓░░░░░░░   ← 5h session, 2 rows, 20 cells × 5%
 
 ## Waiting for an answer
 
-A yellow line under an account's letter means a Claude Code session on that account is waiting for you: a question or a permission prompt. It goes out when you answer.
+A yellow line between an account's two bars (the empty row between the 5h and the weekly one) means a Claude Code session on that account is waiting for you: a question or a permission prompt. It goes out when you answer.
 
 Claude Code hooks in `~/.claude/settings.json` run `attention.py on` on `Notification` (`permission_prompt|elicitation_dialog`) and `PreToolUse` (`AskUserQuestion`), and `attention.py off` on `PostToolUse`, `UserPromptSubmit` and `SessionEnd`. Each call sends one UDP datagram (`{"action", "account", "session"}`) to port 47821, so the screen is redrawn at once with no polling; the monitor keeps the state per account and per session. Usage itself is still fetched every `interval_seconds`.
 

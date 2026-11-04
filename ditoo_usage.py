@@ -125,15 +125,15 @@ def draw_bar(px, rows, pct):
 
 def render(results, waiting_at=()):
     """results: list of (letter, label_color, (five_h, week) | None), one per account.
-    waiting_at: indexes of the accounts to underline in yellow - a Claude Code session waits for an answer."""
+    waiting_at: indexes of the accounts to mark with a yellow line between their bars - a Claude Code session waits for an answer."""
     px = [BLACK] * 256
     for i, (letter, label, usage) in enumerate(results):
         top = i * 6
         for x, y in glyph_pixels(letter):
             px[(top + y) * 16 + x] = label if usage else ERROR
-        if i in waiting_at and top + 4 < 16:
-            for x in range(LABEL_WIDTH):
-                px[(top + 4) * 16 + x] = ATTENTION
+        if i in waiting_at:  # the empty row between the 5h and the weekly bar
+            for x in range(BAR_LEN):
+                px[(top + 2) * 16 + BAR_X0 + x] = ATTENTION
         if usage:
             five, week = usage
             draw_bar(px, [top + 1, top], five)
