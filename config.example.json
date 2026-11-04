@@ -2,6 +2,7 @@
   "port": "COM3",
   "interval_seconds": 120,
   "brightness": 100,
+  "attention_allow": ["192.168.0.0/24"],
   "accounts": [
     { "name": "personal", "letter": "M", "color": "#D97757" },
     { "name": "work",     "letter": "W", "color": "#286EFF" },

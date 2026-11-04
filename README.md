@@ -23,9 +23,14 @@ M  ▓▓▓░░░░░░░   ← 5h session, 2 rows, 20 cells × 5%
 
 ## Waiting for an answer
 
-A yellow line under the first account's letter (or `attention_account` in `config.json`) means a Claude Code session is waiting for you: a question or a permission prompt. It goes out when you answer.
+A yellow line under an account's letter means a Claude Code session on that account is waiting for you: a question or a permission prompt. It goes out when you answer.
 
-Claude Code hooks in `~/.claude/settings.json` run `attention.py on` on `Notification` (`permission_prompt|elicitation_dialog`) and `PreToolUse` (`AskUserQuestion`), and `attention.py off` on `PostToolUse`, `UserPromptSubmit` and `SessionEnd`. The script keeps one file per session in `~/.ditoo/attention/` and sends a UDP datagram to `127.0.0.1:47821`, so the screen is redrawn at once with no polling. Usage itself is still fetched every `interval_seconds`.
+Claude Code hooks in `~/.claude/settings.json` run `attention.py on` on `Notification` (`permission_prompt|elicitation_dialog`) and `PreToolUse` (`AskUserQuestion`), and `attention.py off` on `PostToolUse`, `UserPromptSubmit` and `SessionEnd`. Each call sends one UDP datagram (`{"action", "account", "session"}`) to port 47821, so the screen is redrawn at once with no polling; the monitor keeps the state per account and per session. Usage itself is still fetched every `interval_seconds`.
+
+- `--account NAME` picks the letter (an account `name` from `config.json`); without it, `attention_account` (default: the first account).
+- `--host ADDRESS` sends to the PC the monitor runs on (default `127.0.0.1`). A session on another machine, e.g. a laptop you drive over Remote Control, uses the PC's LAN address, and the PC lists that machine in `attention_allow` (`["192.168.0.0/24"]`: addresses or networks). With `attention_allow` empty the monitor listens on loopback only. Windows asks once to let `pythonw.exe` through its firewall.
+
+On the other machine: copy `attention.py` there (Python 3, no packages) and add the same hooks with `--account NAME --host PC_ADDRESS`. The `off` hooks only start Python when `~/.ditoo/attention/` there has a marker, so they cost nothing while nothing waits.
 
 ## How it works
 

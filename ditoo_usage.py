@@ -4,6 +4,7 @@ Settings come from config.json next to this file (see config.example.json).
 Tokens live in ~/.ditoo/<name>.json (created by auth.py) and are refreshed here.
 Usage: pythonw ditoo_usage.py
 """
+import ipaddress
 import json
 import math
 import os
@@ -28,9 +29,8 @@ STALE_AFTER_S = 30 * 60
 LAST_USAGE = os.path.join(auth.DIR, "last_usage.json")
 DARK_FLAG = os.path.join(auth.DIR, "dark")
 MAX_ACCOUNTS = 3
-# Claude Code sessions waiting for an answer (attention.py, run by hooks); a file older than this is
-# a session that died without saying so.
-ATTENTION_DIR = os.path.join(auth.DIR, "attention")
+# Claude Code sessions waiting for an answer (attention.py, run by hooks, sends a datagram); a mark
+# older than this is a session that died without saying so.
 ATTENTION_PORT = 47821
 ATTENTION_MAX_AGE_S = 12 * 3600
 
@@ -61,6 +61,9 @@ def load_config():
         "brightness": cfg.get("brightness", 100),
         "accounts": accounts,
         "attention_account": cfg.get("attention_account", cfg["accounts"][0]["name"]),
+        # Who may send attention.py's datagrams besides this PC: addresses or networks
+        # ("192.168.0.0/24"). Empty: the monitor listens on loopback only.
+        "attention_allow": [ipaddress.ip_network(a, strict=False) for a in cfg.get("attention_allow", [])],
     }
 
 
@@ -120,15 +123,15 @@ def draw_bar(px, rows, pct):
             px[row * 16 + BAR_X0 + x] = color if x * len(rows) + ri < filled else TRACK
 
 
-def render(results, waiting_at=None):
+def render(results, waiting_at=()):
     """results: list of (letter, label_color, (five_h, week) | None), one per account.
-    waiting_at: index of the account to underline in yellow - a Claude Code session waits for an answer."""
+    waiting_at: indexes of the accounts to underline in yellow - a Claude Code session waits for an answer."""
     px = [BLACK] * 256
     for i, (letter, label, usage) in enumerate(results):
         top = i * 6
         for x, y in glyph_pixels(letter):
             px[(top + y) * 16 + x] = label if usage else ERROR
-        if i == waiting_at and top + 4 < 16:
+        if i in waiting_at and top + 4 < 16:
             for x in range(LABEL_WIDTH):
                 px[(top + 4) * 16 + x] = ATTENTION
         if usage:
@@ -205,29 +208,55 @@ def usage_or_last(name, last):
 
 # --- Waiting for an answer ---------------------------------------------------------------------
 
-def waiting():
-    """True while any Claude Code session has marked itself as waiting for the user."""
-    try:
-        names = os.listdir(ATTENTION_DIR)
-    except OSError:
-        return False
-    now = time.time()
-    for name in names:
-        try:
-            if now - os.path.getmtime(os.path.join(ATTENTION_DIR, name)) < ATTENTION_MAX_AGE_S:
+class Attention:
+    """Which accounts have a Claude Code session waiting for an answer: {account: {session: since}}."""
+
+    def __init__(self, names, default):
+        self.names = names
+        self.default = default
+        self.sessions = {}
+        self.lock = threading.Lock()
+
+    def apply(self, message):
+        """One datagram from attention.py; True when it changed anything."""
+        account = message.get("account") or self.default
+        session = str(message.get("session", ""))[:100]
+        if account not in self.names or not session:
+            return False
+        with self.lock:
+            marks = self.sessions.setdefault(account, {})
+            if message.get("action") == "on":
+                marks[session] = time.time()
                 return True
-        except OSError:
-            pass
-    return False
+            return marks.pop(session, None) is not None
+
+    def waiting_at(self):
+        """Indexes (in account order) of the accounts with a live session waiting."""
+        now = time.time()
+        with self.lock:
+            return {
+                self.names.index(account)
+                for account, marks in self.sessions.items()
+                if any(now - since < ATTENTION_MAX_AGE_S for since in marks.values())
+            }
 
 
-def listen_for_pokes(tick):
-    """attention.py sends a UDP datagram on every change; wake the loop to redraw at once."""
+def listen_for_attention(attention, allow, tick):
+    """attention.py sends a UDP datagram on every change; apply it and redraw at once.
+    Datagrams from anywhere but this PC and the `attention_allow` networks are dropped."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", ATTENTION_PORT))
+    sock.bind(("0.0.0.0" if allow else "127.0.0.1", ATTENTION_PORT))
     while True:
-        sock.recv(64)
-        tick.set()
+        data, (host, _) = sock.recvfrom(512)
+        address = ipaddress.ip_address(host)
+        if not address.is_loopback and not any(address in net for net in allow):
+            continue
+        try:
+            message = json.loads(data)
+        except ValueError:
+            continue
+        if isinstance(message, dict) and attention.apply(message):
+            tick.set()
 
 
 # --- Sleep / wake ------------------------------------------------------------------------------
@@ -300,9 +329,12 @@ def main():
         tick.set()  # the loop restores brightness once the Bluetooth link is back
 
     power.watch(on_sleep, on_wake)
-    threading.Thread(target=listen_for_pokes, args=(tick,), daemon=True).start()
     names = [a[0] for a in accounts]
-    waiting_at = names.index(cfg["attention_account"]) if cfg["attention_account"] in names else 0
+    default = cfg["attention_account"] if cfg["attention_account"] in names else names[0]
+    attention = Attention(names, default)
+    threading.Thread(
+        target=listen_for_attention, args=(attention, cfg["attention_allow"], tick), daemon=True
+    ).start()
     last = load_last()
     results = None
     next_fetch = 0.0
@@ -313,8 +345,8 @@ def main():
                 results = [(letter, color, usage_or_last(name, last)) for name, letter, color in accounts]
                 save_last(last)
                 next_fetch = time.time() + cfg["interval"]
-            wait = waiting()
-            frame = image_packet(render(results, waiting_at if wait else None))
+            wait = attention.waiting_at()
+            frame = image_packet(render(results, wait))
 
             def push(ser):
                 wake_up(ser, cfg["brightness"])
@@ -323,8 +355,9 @@ def main():
 
             if not dev.suspended and dev.run(push):
                 summary = " ".join(f"{a[1]}={r[2]}" for a, r in zip(accounts, results))
-                print(time.strftime("%H:%M:%S"), summary + (" waiting" if wait else ""), flush=True)
-        # A poke (attention.py) or a wake redraws at once; usage is fetched again only when due.
+                waiting = "".join(accounts[i][1] for i in sorted(wait))
+                print(time.strftime("%H:%M:%S"), summary + (f" waiting={waiting}" if wait else ""), flush=True)
+        # A datagram (attention.py) or a wake redraws at once; usage is fetched again only when due.
         tick.wait(max(1.0, next_fetch - time.time()))
         tick.clear()
 
